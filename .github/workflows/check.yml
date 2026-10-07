@@ -1,0 +1,21 @@
+name: Check setup-macos
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell syntax with system Bash
+        run: |
+          for script in install.sh setup.sh utils.sh rollback.sh uninstall.sh; do
+            /bin/bash -n "$script" || exit
+          done
+      - name: Check Brewfile syntax
+        run: |
+          ruby -c brewfile
+          ruby -c brewfile-extra
+      - name: Run offline behavior tests
+        run: python3 -m unittest discover -s tests -v

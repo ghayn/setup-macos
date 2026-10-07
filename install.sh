@@ -1,115 +1,90 @@
-#!/bin/zsh
-set -eu
+#!/bin/bash
+# Standalone entry point: works from a checkout, a downloaded file, or bash -c.
+if [ -z "${BASH_VERSION:-}" ]; then
+  printf '%s\n' '请使用 /bin/bash 运行安装脚本（不再使用 zsh）。' >&2
+  exit 1
+fi
+set -Eeuo pipefail
 
-source ./utils.sh
+usage() {
+  cat <<'HELP'
+setup-macos：macOS 开发环境一键安装（macOS 15 及以上，面向 macOS 27 / Apple Silicon）
+用法：/bin/bash install.sh [选项]
+回滚：/bin/bash install.sh uninstall [--dry-run] [--latest]
+  --dry-run          只显示计划，不安装、不修改用户配置
+  --test             测试环境：跳过所有 cask 应用和字体
+  --with-extra       同时安装 brewfile-extra 中的应用
+  --skip-dotfiles    跳过默认启用的 ghayn/dotfiles 个人配置
+  --with-dotfiles    显式启用个人配置（默认）
+  --skip-casks       不安装 GUI 应用和字体
+  --skip-runtimes    不安装 Node.js / Ruby / Python 及其附加工具
+  --skip-shell       不配置 Zim / tmux
+  --skip-rust        不安装 Rust
+  -h, --help         显示帮助
+环境变量：INSTALLER_REPO、INSTALLER_REF、NODEJS_VERSION、RUBY_VERSION、PYTHON_VERSION
+INSTALLER_ENV=test 或 CI=1/true 也会自动跳过 cask。
+HELP
+}
 
-os_version=$(sw_vers -productVersion)
-os_major_version=$(echo $os_version | awk -F'.' '{print $1}')
-password=""
-
-__check_requirements() {
-  if [ $os_major_version -lt 12 ]; then
-    echo "Current macOS version is $os_version which is not supported."
-    exit 1
+bootstrap() {
+  local arg source_file source_dir work_dir repo ref action_script=setup.sh
+  local -a original_args=("$@")
+  if [[ "${1:-}" == uninstall || "${1:-}" == --uninstall ]]; then
+    action_script=uninstall.sh
+    shift
   fi
-}
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help) usage; return ;;
+      --dry-run|--latest|--test|--with-extra|--with-dotfiles|--skip-dotfiles|--skip-casks|--skip-runtimes|--skip-shell|--skip-rust) ;;
+      *) printf '未知参数：%s\n' "$arg" >&2; return 2 ;;
+    esac
+  done
+  [[ "$(uname -s)" == Darwin ]] || { printf '%s\n' '此脚本仅支持 macOS。' >&2; return 1; }
 
-__gather_password() {
-  echo 'We need admin permission to install packages.'
-  password=$(password_input "Password: ")
-  echo
-}
-
-
-start() {
-  __check_requirements
-
-  local COLUMNS=$(tput cols)  # 获取终端列数
-
-  local separator="*"
-  local message="ATTENTION: WE ARE SETTING UP DEV ENVIRONMENT"
-  local arch=$(uname -m)
-  local machine_model=$(sysctl -n hw.model)
-  local machine_sn=$(system_profiler SPHardwareDataType | awk '/Serial/ {print $4}')
-  local hostname=$(hostname)
-
-  printf "%-${COLUMNS}s\n" | tr ' ' "$separator"
-
-  # 打印信息和左右边框
-  echo
-  printf "HostName: $hostname\n"
-  echo
-  printf "macOS Version: $os_version($arch)\n"
-  echo
-  printf "Machine Info: $machine_model($machine_sn)\n"
-  echo
-
-  # 打印底部边框
-  printf "%-${COLUMNS}s\n" | tr ' ' "$separator"
-
-  echo "\n!!! $message"
-  __gather_password
-  echo "!!! This setup will begin in 5 seconds, press Ctrl+C to cancel..."
-  sleep 5
-  clear
-  echo "[$(date)] Time's up! Here we go!"
-  echo
-}
-
-install_xcode_cli_tools() {
-  echo "Checking Command Line Tools for Xcode"
-  # Only run if the tools are not installed yet
-  # To check that try to print the SDK path
-  set +e
-  xcode-select -p &> /dev/null
-  res=$?
-  set -e
-
-  if [ $res -ne 0 ]; then
-    echo "Command Line Tools for Xcode not found. Installing from softwareupdate…"
-  # This temporary file prompts the 'softwareupdate' utility to list the Command Line Tools
-    touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress;
-    PROD=$(softwareupdate -l | grep "\*.*Command Line" | tail -n 1 | sed 's/^[^C]* //')
-    softwareupdate -i "$PROD" --verbose;
-  else
-    echo "Command Line Tools for Xcode have been installed."
-  fi
-}
-
-install_homebrew() {
-  printf '-%.0s' {1..$(($COLUMNS-1))}; echo
-  echo "Install Homebrew"
-  printf '-%.0s' {1..$(($COLUMNS-1))}; echo
-
-  if command -v brew >/dev/null 2>&1; then
-      echo "Homebrew is installed. Skipping..."
-  else
-    autoinput /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install.sh)" \
-      {\[P\|p\]assword:} \
-      $password
-  fi
-}
-
-run_setup() {
-  tmp_dir="/tmp/installer"
-  echo "Clone installer into $tmp_dir"
-
-  if [ -d "$tmp_dir" ]; then
-    cleanup
+  # Never install Intel Homebrew accidentally from a Rosetta terminal.
+  if [[ "$(sysctl -in sysctl.proc_translated 2>/dev/null || true)" == 1 ]]; then
+    printf '%s\n' '检测到 Rosetta，切换至原生 Apple Silicon 环境。'
+    if [[ -n "${BASH_EXECUTION_STRING:-}" ]]; then
+      exec /usr/bin/arch -arm64 /bin/bash -c "$BASH_EXECUTION_STRING" "$0" "${original_args[@]}"
+    else
+      exec /usr/bin/arch -arm64 /bin/bash "${BASH_SOURCE[0]}" "${original_args[@]}"
+    fi
   fi
 
-  git clone https://github.com/ghayn/installer.git /tmp/installer
-  cd $tmp_dir
-  echo "Run setup.sh at $(pwd)"
-  chmod +x setup.sh && zsh -c "PASSWORD=$password ./setup.sh"
+  source_file="${BASH_SOURCE[0]:-}"
+  if [[ -n "$source_file" && -f "$source_file" ]]; then
+    source_dir="$(cd -- "$(dirname -- "$source_file")" && pwd)"
+    if [[ -f "$source_dir/$action_script" && -f "$source_dir/utils.sh" && -f "$source_dir/rollback.sh" && -f "$source_dir/brewfile" ]]; then
+      /bin/bash "$source_dir/$action_script" "$@"
+      return
+    fi
+  fi
+
+  repo="${INSTALLER_REPO:-ghayn/setup-macos}"
+  ref="${INSTALLER_REF:-main}"
+  [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { printf '%s\n' 'INSTALLER_REPO 格式应为 owner/repo。' >&2; return 2; }
+  [[ "$ref" =~ ^[A-Za-z0-9_./-]+$ ]] || { printf '%s\n' 'INSTALLER_REF 包含不支持的字符。' >&2; return 2; }
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/setup-macos-bootstrap.XXXXXXXX")"
+  BOOTSTRAP_TMP="$work_dir"
+  # Cleanup only this invocation's private directory, including on interruption.
+  trap 'rm -rf -- "$BOOTSTRAP_TMP"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  printf '下载安装文件：%s (%s)\n' "$repo" "$ref"
+  curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 \
+    --retry 3 --connect-timeout 20 --max-time 300 \
+    "https://codeload.github.com/$repo/tar.gz/$ref" -o "$work_dir/source.tar.gz"
+  mkdir "$work_dir/source"
+  tar -xzf "$work_dir/source.tar.gz" -C "$work_dir/source" --strip-components=1
+  for arg in setup.sh uninstall.sh utils.sh rollback.sh brewfile brewfile-extra; do
+    [[ -s "$work_dir/source/$arg" ]] || { printf '安装文件缺失：%s\n' "$arg" >&2; return 1; }
+  done
+  /bin/bash "$work_dir/source/$action_script" "$@"
+  rm -rf -- "$work_dir"
+  trap - EXIT
 }
 
-cleanup() {
-  rm -rf /tmp/installer
-}
-
-start
-install_xcode_cli_tools
-install_homebrew
-run_setup
-cleanup
+if [[ "${BASH_SOURCE[0]:-}" == "$0" || -z "${BASH_SOURCE[0]:-}" ]]; then
+  bootstrap "$@"
+fi

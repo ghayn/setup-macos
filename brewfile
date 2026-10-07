@@ -1,6 +1,4 @@
-tap "homebrew/cask-fonts"
-tap "buo/cask-upgrade"
-tap localsend/localsend
+# Fonts and LocalSend are now available directly from homebrew/cask.
 
 brew "mas"
 
@@ -12,7 +10,8 @@ brew "jq"
 brew "eza"
 brew "htop"
 brew "tmux"
-brew "asdf"
+brew "mise"
+brew "zimfw"
 brew "fzf"
 brew "ripgrep"
 brew "fd"
@@ -27,6 +26,19 @@ brew "zoxide"
 brew "difftastic"
 brew "gnupg"
 
+# Native build dependencies for mise Ruby and Python.
+brew "autoconf"
+brew "pkgconf"
+brew "openssl@3"
+brew "readline"
+brew "libyaml"
+brew "gmp"
+brew "sqlite"
+brew "xz"
+brew "zlib"
+brew "bzip2"
+brew "libffi"
+
 cask "font-meslo-lg-nerd-font"
 cask "font-caskaydia-cove-nerd-font"
 cask "1password"
@@ -35,4 +47,3 @@ cask "visual-studio-code"
 cask "karabiner-elements"
 cask "rectangle"
 cask "kitty"
-cask "localsend"
