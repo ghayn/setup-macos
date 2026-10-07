@@ -265,6 +265,7 @@ finish_rollback_record
         self.assertEqual(config.stat().st_mode & 0o777, 0o755)
         self.assertFalse((self.account / ".local/bin/command").exists())
         self.assertFalse((self.account / ".zimrc").exists())
+        self.assertFalse((self.account / ".local/share/chezmoi").exists())
 
     def test_no_record_and_legacy_backup_are_non_destructive(self):
         self.uninstall()

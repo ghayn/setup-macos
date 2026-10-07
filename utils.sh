@@ -43,8 +43,18 @@ backup_file() {
   fi
 }
 
+dotfiles_manages_path() {
+  local file="$1" managed
+  [[ -n "${SETUP_TMP:-}" && -f "$SETUP_TMP/managed-files" ]] || return 1
+  while IFS= read -r -d '' managed; do
+    if [[ "$file" == "$managed" || "$file" == "$managed/"* || "$file" -ef "$managed" ]]; then return 0; fi
+  done < "$SETUP_TMP/managed-files"
+  return 1
+}
+
 append_once() {
   local file="$1" line="$2"
+  if dotfiles_manages_path "$file"; then return; fi
   if [[ -f "$file" ]] && grep -Fqx -- "$line" "$file"; then return; fi
   backup_file "$file"
   mkdir -p -- "$(dirname -- "$file")"

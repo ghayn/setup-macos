@@ -48,7 +48,7 @@ print_plan() {
     awk -v skip="$SKIP_CASKS" '/^brew / || (/^cask / && !skip) { print "  " $0 }' "$manifest"
   done
   (( SKIP_SHELL )) || printf '%s\n' '• 配置 Zim 和 tmux；已有配置先备份，已有 tmux 配置保留'
-  (( ! WITH_DOTFILES )) || printf '%s\n' '• 备份并应用 ghayn/dotfiles，迁移旧 exa / asdf / Cargo 设置'
+  (( ! WITH_DOTFILES )) || printf '%s\n' '• 备份并应用 dotfiles'
   if (( ! SKIP_RUNTIMES )); then
     printf '• mise 管理 Node.js: %s；Ruby: %s；Python: %s\n' "${NODEJS_VERSION:-当前 LTS}" "${RUBY_VERSION:-最新稳定版}" "${PYTHON_VERSION:-最新稳定版}"
     printf '%s\n' '• pnpm、pip、Poetry（独立虚拟环境）'
@@ -71,49 +71,45 @@ install_packages() {
   done
 }
 
+prepare_dotfiles_source() {
+  local source="$1"
+  # Reuse the user's repository, including its remotes and uncommitted edits.
+  if [[ -e "$source/.git" ]]; then
+    git -C "$source" rev-parse --is-inside-work-tree >/dev/null || die "chezmoi 源仓库无效：$source"
+    log "使用已有 chezmoi 源仓库：$source"
+    return
+  fi
+  if [[ -e "$source" || -L "$source" ]]; then
+    [[ -d "$source" && -z "$(ls -A "$source")" ]] ||
+      die "chezmoi 源目录已有文件但不是 Git 仓库，请先整理或使用 --skip-dotfiles：$source"
+  fi
+  track_path "$source"
+  mkdir -p "$(dirname -- "$source")"
+  log "初始化 chezmoi 源仓库：$source"
+  git clone https://github.com/ghayn/dotfiles.git "$source"
+}
+
 apply_dotfiles() {
   (( WITH_DOTFILES )) || return 0
-  log '备份并应用 ghayn/dotfiles'
-  # Use a separate source to avoid replacing an existing chezmoi repository.
-  local dot_source="$SETUP_TMP/dotfiles" file
-  local -a chezmoi_cmd=(chezmoi --source "$dot_source" --destination "$HOME"
-    --config "$SETUP_TMP/chezmoi.toml" --persistent-state "$SETUP_TMP/chezmoi-state.boltdb"
-    --cache "$SETUP_TMP/chezmoi-cache")
-  : > "$SETUP_TMP/chezmoi.toml"
-  git clone --depth 1 https://github.com/ghayn/dotfiles.git "$dot_source"
+  log '备份并应用 dotfiles'
+  local dot_source file
+  # Honor chezmoi's configured source and template data. Only transient state
+  # belongs in SETUP_TMP; the Git repository must survive cleanup_setup.
+  local -a chezmoi_cmd=(chezmoi --destination "$HOME"
+    --persistent-state "$SETUP_TMP/chezmoi-state.boltdb" --cache "$SETUP_TMP/chezmoi-cache")
+  dot_source="$("${chezmoi_cmd[@]}" source-path)"
+  prepare_dotfiles_source "$dot_source"
+  chezmoi_cmd+=(--source "$dot_source")
   "${chezmoi_cmd[@]}" managed --include=dirs --path-style=absolute --nul-path-separator > "$SETUP_TMP/managed-dirs"
   while IFS= read -r -d '' file; do track_directory "$file"; done < "$SETUP_TMP/managed-dirs"
   "${chezmoi_cmd[@]}" managed --include=files,symlinks --path-style=absolute --nul-path-separator > "$SETUP_TMP/managed-files"
   while IFS= read -r -d '' file; do backup_file "$file"; done < "$SETUP_TMP/managed-files"
   "${chezmoi_cmd[@]}" apply --force --include=files,symlinks,dirs
-  # Migrate the known legacy settings in this personal repository only.
-  if [[ -f "$HOME/.zimrc" ]]; then
-    backup_file "$HOME/.zimrc"
-    # eza is already installed by Brewfile and aliased in dot_zshenv. There is
-    # no zimfw/eza module to substitute for the old exa module.
-    sed -E '/^[[:space:]]*zmodule[[:space:]]+(asdf|exa)[[:space:]]*$/d' \
-      "$HOME/.zimrc" > "$SETUP_TMP/zimrc"
-    cat "$SETUP_TMP/zimrc" > "$HOME/.zimrc"
-  fi
-  if [[ -f "$HOME/.zshenv" ]]; then
-    backup_file "$HOME/.zshenv"
-    sed 's|export CARGO_HOME="$HOME/.cargo/bin"|export CARGO_HOME="$HOME/.cargo"|; s|add_to_path_if_missing "$CARGO_HOME"|add_to_path_if_missing "$CARGO_HOME/bin"|' \
-      "$HOME/.zshenv" > "$SETUP_TMP/zshenv"
-    cat "$SETUP_TMP/zshenv" > "$HOME/.zshenv"
-  fi
 }
 
 configure_environment() {
   log '配置终端环境'
-  local zdot="${ZDOTDIR:-$HOME}" line legacy_line
-  # Remove the exact PATH entry emitted by earlier versions of this installer.
-  # Keep arbitrary user shell code and the old asdf installations untouched.
-  legacy_line='typeset -U path; path=("${ASDF_DATA_DIR:-$HOME/.asdf}/shims" "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.local/bin" $path)'
-  if [[ -f "$zdot/.zshrc" ]] && grep -Fqx -- "$legacy_line" "$zdot/.zshrc"; then
-    backup_file "$zdot/.zshrc"
-    awk -v legacy="$legacy_line" '$0 != legacy' "$zdot/.zshrc" > "$SETUP_TMP/zshrc"
-    cat "$SETUP_TMP/zshrc" > "$zdot/.zshrc"
-  fi
+  local zdot="${ZDOTDIR:-$HOME}" line
   printf -v line 'eval "$(%s shellenv)"' "$BREW"
   append_once "$zdot/.zprofile" "$line"
   append_once "$zdot/.zshrc" "$line"
@@ -123,8 +119,6 @@ configure_environment() {
   printf -v line 'eval "$(%s activate zsh)"' "$BREW_PREFIX/bin/mise"
   append_once "$zdot/.zshrc" "$line"
   export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
-  # Repair an inherited value from the old personal dotfiles.
-  if [[ "$CARGO_HOME" == "$HOME/.cargo/bin" ]]; then export CARGO_HOME="$HOME/.cargo"; fi
   export PATH="$CARGO_HOME/bin:$HOME/.local/bin:$PATH"
 }
 
@@ -254,7 +248,7 @@ main() {
   export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_BUNDLE_NO_UPGRADE=1
   install_packages
   begin_rollback_record
-  # Work outside any project mise.toml / .tool-versions file.
+  # Work outside any project-specific runtime configuration.
   cd "$HOME"
   apply_dotfiles
   configure_environment

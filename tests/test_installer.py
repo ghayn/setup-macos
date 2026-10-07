@@ -1,6 +1,5 @@
 """Offline behavior tests: no packages, sudo, network, or real home changes."""
 import os
-import json
 from pathlib import Path
 import shlex
 import shutil
@@ -19,7 +18,7 @@ class InstallerTests(unittest.TestCase):
         self.account.mkdir()
         # Give the subprocess a synthetic user account, never the real home.
         self.env = dict(os.environ, HOME=str(self.account), TEST_ROOT=str(self.root))
-        for key in ("ZDOTDIR", "ZIM_HOME", "ASDF_DATA_DIR", "CARGO_HOME", "BASH_ENV",
+        for key in ("ZDOTDIR", "ZIM_HOME", "ZIM_CONFIG_FILE", "CARGO_HOME", "BASH_ENV",
                     "NODEJS_VERSION", "RUBY_VERSION", "PYTHON_VERSION", "CI", "INSTALLER_ENV"):
             self.env.pop(key, None)
         for key in list(self.env):
@@ -70,7 +69,6 @@ sysctl() {{ echo {translated}; }}
                          ' --dry-run --with-extra --test')
         self.assertIn("macOS 27.0", out)
         self.assertIn('brew "mise"', out)
-        self.assertNotIn('brew "asdf"', out)
         self.assertNotIn('cask "', out)
         self.assertEqual(list(self.account.iterdir()), [])
 
@@ -94,7 +92,7 @@ parse_options --skip-dotfiles --skip-shell
 ''')
 
     @unittest.skipUnless(shutil.which("chezmoi"), "Optional integration check needs chezmoi")
-    def test_dotfiles_backup_and_legacy_migration(self):
+    def test_dotfiles_are_backed_up_and_applied_without_rewriting(self):
         self.shell(self.setup_source() + '''
 parse_options
 SETUP_TMP="$TEST_ROOT/work"; mkdir "$SETUP_TMP"
@@ -105,17 +103,17 @@ git() {
   local dest="${@: -1}"
   mkdir "$dest"
   printf '# new shell\\n' > "$dest/private_dot_zshrc"
-  printf 'zmodule git\\nzmodule asdf\\nzmodule exa\\n' > "$dest/private_dot_zimrc"
+  printf 'zmodule git\\nzmodule exa\\n' > "$dest/private_dot_zimrc"
   printf '%s\\n' 'export CARGO_HOME="$HOME/.cargo/bin"' \\
     'add_to_path_if_missing "$CARGO_HOME"' > "$dest/dot_zshenv"
 }
 apply_dotfiles
 [[ $(cat "$BACKUP_DIR/.zshrc") == '# original' ]]
 [[ $(cat "$BACKUP_DIR/.zshenv") == '# original env' ]]
-[[ $(cat "$HOME/.zshrc") == '# new shell' ]]
-[[ $(cat "$HOME/.zimrc") == 'zmodule git' ]]
-grep -Fqx 'export CARGO_HOME="$HOME/.cargo"' "$HOME/.zshenv"
-[[ ! -e "$HOME/.local/share/chezmoi" ]]
+cmp "$HOME/.local/share/chezmoi/private_dot_zshrc" "$HOME/.zshrc"
+cmp "$HOME/.local/share/chezmoi/private_dot_zimrc" "$HOME/.zimrc"
+cmp "$HOME/.local/share/chezmoi/dot_zshenv" "$HOME/.zshenv"
+[[ -d "$HOME/.local/share/chezmoi" ]]
 ''')
 
     def test_clt_labels_use_numeric_order(self):
@@ -150,22 +148,6 @@ configure_environment
 [[ $(cat "$BACKUP_DIR/.zshrc") == '# original' ]]
 ''')
         self.assertIn("# original", (self.account / ".zshrc").read_text())
-
-    def test_old_installer_asdf_path_is_backed_up_and_replaced(self):
-        self.shell(self.setup_source() + '''
-BACKUP_DIR="$HOME/backups"
-SETUP_TMP="$TEST_ROOT/work"; mkdir "$SETUP_TMP"
-BREW_PREFIX=/opt/homebrew
-BREW="$BREW_PREFIX/bin/brew"
-printf '%s\\n' '# personal settings' \\
-  'typeset -U path; path=("${ASDF_DATA_DIR:-$HOME/.asdf}/shims" "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.local/bin" $path)' > "$HOME/.zshrc"
-configure_environment
-configure_environment
-! grep -q ASDF_DATA_DIR "$HOME/.zshrc"
-grep -q ASDF_DATA_DIR "$BACKUP_DIR/.zshrc"
-grep -Fqx '# personal settings' "$HOME/.zshrc"
-[[ $(grep -c 'mise activate zsh' "$HOME/.zshrc") == 1 ]]
-''')
 
     def test_existing_tmux_config_is_preserved(self):
         self.shell(self.setup_source() + '''
@@ -322,7 +304,6 @@ esac
         config = self.account / ".config/mise/config.toml"
         config.parent.mkdir(parents=True)
         config.write_text("# existing mise config\n")
-        (self.account / ".tool-versions").write_text("nodejs 20.1.0\n")
         return self.setup_source() + '''
 BREW_PREFIX="$TEST_ROOT/brew"
 BACKUP_DIR="$HOME/backups"
@@ -338,10 +319,8 @@ SETUP_TMP="$TEST_ROOT/work"; mkdir -p "$SETUP_TMP"
         self.assertIn("exec " + versions + " -- npm install --global --prefix ", calls)
         self.assertIn("exec " + versions + " -- python -m pip --isolated --no-cache-dir install --upgrade pip", calls)
         self.assertIn("reshim", calls)
-        self.assertNotIn("asdf", calls)
         self.assertEqual((self.account / "backups/.config/mise/config.toml").read_text(),
                          "# existing mise config\n")
-        self.assertEqual((self.account / ".tool-versions").read_text(), "nodejs 20.1.0\n")
         self.assertTrue((self.account / ".local/bin/poetry").is_symlink())
 
     def test_runtime_install_then_uninstall_restores_prior_state(self):
@@ -392,24 +371,6 @@ NODEJS_VERSION=22.12.0 RUBY_VERSION=3.3.6 PYTHON_VERSION=3.12.8 install_runtimes
         self.env["MISE_GLOBAL_CONFIG_FILE"] = str(config)
         self.shell(code + 'install_runtimes')
         self.assertEqual((self.account / "backups/custom mise.toml").read_text(), "# custom config\n")
-
-    @unittest.skipUnless(shutil.which("mise"), "Optional integration check needs mise")
-    def test_real_mise_preserves_project_tool_versions_compatibility(self):
-        config = self.account / ".config/mise/config.toml"
-        config.parent.mkdir(parents=True)
-        config.write_text('[tools]\nnode = "24.9.0"\n')
-        (self.account / ".tool-versions").write_text("nodejs 20.1.0\n")
-        project = self.account / "project"
-        project.mkdir()
-        # These exact declarations are only inspected; no runtimes are installed.
-        self.env.update(MISE_AUTO_INSTALL="false", MISE_DATA_DIR=str(self.root / "mise-data"),
-                        MISE_CACHE_DIR=str(self.root / "mise-cache"), MISE_STATE_DIR=str(self.root / "mise-state"))
-        command = ('cd ' + shlex.quote(str(project)) + '; ' +
-                   shlex.quote(shutil.which("mise")) + ' ls --current --json')
-        self.assertEqual(json.loads(self.shell(command))["node"][0]["version"], "24.9.0")
-        (project / ".tool-versions").write_text("nodejs 22.12.0\n")
-        self.assertEqual(json.loads(self.shell(command))["node"][0]["version"], "22.12.0")
-        self.assertFalse((self.root / "mise-data/installs").exists())
 
 
 if __name__ == "__main__":
